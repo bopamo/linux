@@ -166,6 +166,7 @@ enum {
 	STAC_D965_VERBS,
 	STAC_DELL_3ST,
 	STAC_DELL_BIOS,
+	STAC_NEMO_DEFAULT,
 	STAC_DELL_BIOS_AMIC,
 	STAC_DELL_BIOS_SPDIF,
 	STAC_927X_DELL_DMIC,
@@ -493,9 +494,9 @@ static void jack_update_power(struct hda_codec *codec,
 	if (!spec->num_pwrs)
 		return;
 
-	if (jack && jack->tbl->nid) {
-		stac_toggle_power_map(codec, jack->tbl->nid,
-				      snd_hda_jack_detect(codec, jack->tbl->nid),
+	if (jack && jack->nid) {
+		stac_toggle_power_map(codec, jack->nid,
+				      snd_hda_jack_detect(codec, jack->nid),
 				      true);
 		return;
 	}
@@ -960,7 +961,7 @@ static int stac_smux_enum_put(struct snd_kcontrol *kcontrol,
 				     &spec->cur_smux[smux_idx]);
 }
 
-static struct snd_kcontrol_new stac_smux_mixer = {
+static const struct snd_kcontrol_new stac_smux_mixer = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "IEC958 Playback Source",
 	/* count set later */
@@ -1360,6 +1361,27 @@ static const struct hda_pintbl oqo9200_pin_configs[] = {
 	{}
 };
 
+/*
+ *  STAC 92HD700
+ *  18881000 Amigaone X1000
+ */
+static const struct hda_pintbl nemo_pin_configs[] = {
+	{ 0x0a, 0x02214020 },	/* Front panel HP socket */
+	{ 0x0b, 0x02a19080 },	/* Front Mic */
+	{ 0x0c, 0x0181304e },	/* Line in */
+	{ 0x0d, 0x01014010 },	/* Line out */
+	{ 0x0e, 0x01a19040 },	/* Rear Mic */
+	{ 0x0f, 0x01011012 },	/* Rear speakers */
+	{ 0x10, 0x01016011 },	/* Center speaker */
+	{ 0x11, 0x01012014 },	/* Side speakers (7.1) */
+	{ 0x12, 0x103301f0 },	/* Motherboard CD line in connector */
+	{ 0x13, 0x411111f0 },	/* Unused */
+	{ 0x14, 0x411111f0 },	/* Unused */
+	{ 0x21, 0x01442170 },	/* S/PDIF line out */
+	{ 0x22, 0x411111f0 },	/* Unused */
+	{ 0x23, 0x411111f0 },	/* Unused */
+	{}
+};
 
 static void stac9200_fixup_panasonic(struct hda_codec *codec,
 				     const struct hda_fixup *fix, int action)
@@ -1537,6 +1559,8 @@ static const struct snd_pci_quirk stac9200_fixup_tbl[] = {
 		      "Dell Inspiron 1501", STAC_9200_DELL_M26),
 	SND_PCI_QUIRK(PCI_VENDOR_ID_DELL, 0x01f6,
 		      "unknown Dell", STAC_9200_DELL_M26),
+	SND_PCI_QUIRK(PCI_VENDOR_ID_DELL, 0x0201,
+		      "Dell Latitude D430", STAC_9200_DELL_M22),
 	/* Panasonic */
 	SND_PCI_QUIRK(0x10f7, 0x8338, "Panasonic CF-74", STAC_9200_PANASONIC),
 	/* Gateway machines needs EAPD to be set on resume */
@@ -3110,6 +3134,29 @@ static void stac92hd71bxx_fixup_hp_hdx(struct hda_codec *codec,
 	spec->gpio_led = 0x08;
 }
 
+static bool is_hp_output(struct hda_codec *codec, hda_nid_t pin)
+{
+	unsigned int pin_cfg = snd_hda_codec_get_pincfg(codec, pin);
+
+	/* count line-out, too, as BIOS sets often so */
+	return get_defcfg_connect(pin_cfg) != AC_JACK_PORT_NONE &&
+		(get_defcfg_device(pin_cfg) == AC_JACK_LINE_OUT ||
+		 get_defcfg_device(pin_cfg) == AC_JACK_HP_OUT);
+}
+
+static void fixup_hp_headphone(struct hda_codec *codec, hda_nid_t pin)
+{
+	unsigned int pin_cfg = snd_hda_codec_get_pincfg(codec, pin);
+
+	/* It was changed in the BIOS to just satisfy MS DTM.
+	 * Lets turn it back into slaved HP
+	 */
+	pin_cfg = (pin_cfg & (~AC_DEFCFG_DEVICE)) |
+		(AC_JACK_HP_OUT << AC_DEFCFG_DEVICE_SHIFT);
+	pin_cfg = (pin_cfg & (~(AC_DEFCFG_DEF_ASSOC | AC_DEFCFG_SEQUENCE))) |
+		0x1f;
+	snd_hda_codec_set_pincfg(codec, pin, pin_cfg);
+}
 
 static void stac92hd71bxx_fixup_hp(struct hda_codec *codec,
 				   const struct hda_fixup *fix, int action)
@@ -3119,22 +3166,12 @@ static void stac92hd71bxx_fixup_hp(struct hda_codec *codec,
 	if (action != HDA_FIXUP_ACT_PRE_PROBE)
 		return;
 
-	if (hp_blike_system(codec->core.subsystem_id)) {
-		unsigned int pin_cfg = snd_hda_codec_get_pincfg(codec, 0x0f);
-		if (get_defcfg_device(pin_cfg) == AC_JACK_LINE_OUT ||
-			get_defcfg_device(pin_cfg) == AC_JACK_SPEAKER  ||
-			get_defcfg_device(pin_cfg) == AC_JACK_HP_OUT) {
-			/* It was changed in the BIOS to just satisfy MS DTM.
-			 * Lets turn it back into slaved HP
-			 */
-			pin_cfg = (pin_cfg & (~AC_DEFCFG_DEVICE))
-					| (AC_JACK_HP_OUT <<
-						AC_DEFCFG_DEVICE_SHIFT);
-			pin_cfg = (pin_cfg & (~(AC_DEFCFG_DEF_ASSOC
-							| AC_DEFCFG_SEQUENCE)))
-								| 0x1f;
-			snd_hda_codec_set_pincfg(codec, 0x0f, pin_cfg);
-		}
+	/* when both output A and F are assigned, these are supposedly
+	 * dock and built-in headphones; fix both pin configs
+	 */
+	if (is_hp_output(codec, 0x0a) && is_hp_output(codec, 0x0f)) {
+		fixup_hp_headphone(codec, 0x0a);
+		fixup_hp_headphone(codec, 0x0f);
 	}
 
 	if (find_mute_led_cfg(codec, 1))
@@ -3870,6 +3907,10 @@ static const struct hda_fixup stac927x_fixups[] = {
 		.type = HDA_FIXUP_PINS,
 		.v.pins = d965_5st_no_fp_pin_configs,
 	},
+	[STAC_NEMO_DEFAULT] = {
+		.type = HDA_FIXUP_PINS,
+		.v.pins = nemo_pin_configs,
+	},
 	[STAC_DELL_3ST] = {
 		.type = HDA_FIXUP_PINS,
 		.v.pins = dell_3st_pin_configs,
@@ -3926,6 +3967,7 @@ static const struct hda_model_fixup stac927x_models[] = {
 	{ .id = STAC_D965_5ST_NO_FP, .name = "5stack-no-fp" },
 	{ .id = STAC_DELL_3ST, .name = "dell-3stack" },
 	{ .id = STAC_DELL_BIOS, .name = "dell-bios" },
+	{ .id = STAC_NEMO_DEFAULT, .name = "nemo-default" },
 	{ .id = STAC_DELL_BIOS_AMIC, .name = "dell-bios-amic" },
 	{ .id = STAC_927X_VOLKNOB, .name = "volknob" },
 	{}
@@ -3964,6 +4006,8 @@ static const struct snd_pci_quirk stac927x_fixup_tbl[] = {
 			   "Intel D965", STAC_D965_5ST),
 	SND_PCI_QUIRK_MASK(PCI_VENDOR_ID_INTEL, 0xff00, 0x2500,
 			   "Intel D965", STAC_D965_5ST),
+	/* Nemo */
+	SND_PCI_QUIRK(0x1888, 0x1000, "AmigaOne X1000", STAC_NEMO_DEFAULT),
 	/* volume-knob fixes */
 	SND_PCI_QUIRK_VENDOR(0x10cf, "FSC", STAC_927X_VOLKNOB),
 	{} /* terminator */
@@ -5023,6 +5067,7 @@ static const struct hda_device_id snd_hda_id_sigmatel[] = {
 	HDA_CODEC_ENTRY(0x83847683, "STAC9221D A2", patch_stac922x),
 	HDA_CODEC_ENTRY(0x83847618, "STAC9227", patch_stac927x),
 	HDA_CODEC_ENTRY(0x83847619, "STAC9227", patch_stac927x),
+	HDA_CODEC_ENTRY(0x83847638, "STAC92HD700", patch_stac927x),
 	HDA_CODEC_ENTRY(0x83847616, "STAC9228", patch_stac927x),
 	HDA_CODEC_ENTRY(0x83847617, "STAC9228", patch_stac927x),
 	HDA_CODEC_ENTRY(0x83847614, "STAC9229", patch_stac927x),

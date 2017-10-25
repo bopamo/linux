@@ -32,12 +32,16 @@
 
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_dp_helper.h>
 #include <drm/drm_fixed.h>
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_fb_helper.h>
 #include <drm/drm_plane_helper.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
+#include <linux/hrtimer.h>
+#include "amdgpu_irq.h"
 
 struct amdgpu_bo;
 struct amdgpu_device;
@@ -52,7 +56,7 @@ struct amdgpu_hpd;
 
 #define AMDGPU_MAX_HPD_PINS 6
 #define AMDGPU_MAX_CRTCS 6
-#define AMDGPU_MAX_AFMT_BLOCKS 7
+#define AMDGPU_MAX_AFMT_BLOCKS 9
 
 enum amdgpu_rmx_type {
 	RMX_OFF,
@@ -253,23 +257,13 @@ struct amdgpu_audio {
 	int num_pins;
 };
 
-struct amdgpu_mode_mc_save {
-	u32 vga_render_control;
-	u32 vga_hdp_control;
-	bool crtc_enabled[AMDGPU_MAX_CRTCS];
-};
-
 struct amdgpu_display_funcs {
-	/* vga render */
-	void (*set_vga_render_state)(struct amdgpu_device *adev, bool render);
 	/* display watermarks */
 	void (*bandwidth_update)(struct amdgpu_device *adev);
 	/* get frame count */
 	u32 (*vblank_get_counter)(struct amdgpu_device *adev, int crtc);
 	/* wait for vblank */
 	void (*vblank_wait)(struct amdgpu_device *adev, int crtc);
-	/* is dce hung */
-	bool (*is_display_hung)(struct amdgpu_device *adev);
 	/* set backlight level */
 	void (*backlight_set_level)(struct amdgpu_encoder *amdgpu_encoder,
 				    u8 level);
@@ -282,7 +276,7 @@ struct amdgpu_display_funcs {
 	u32 (*hpd_get_gpio_reg)(struct amdgpu_device *adev);
 	/* pageflipping */
 	void (*page_flip)(struct amdgpu_device *adev,
-			 int crtc_id, u64 crtc_base);
+			  int crtc_id, u64 crtc_base, bool async);
 	int (*page_flip_get_scanoutpos)(struct amdgpu_device *adev, int crtc,
 					u32 *vbl, u32 *position);
 	/* display topology setup */
@@ -298,18 +292,14 @@ struct amdgpu_display_funcs {
 			      uint16_t connector_object_id,
 			      struct amdgpu_hpd *hpd,
 			      struct amdgpu_router *router);
-	void (*stop_mc_access)(struct amdgpu_device *adev,
-			       struct amdgpu_mode_mc_save *save);
-	void (*resume_mc_access)(struct amdgpu_device *adev,
-				 struct amdgpu_mode_mc_save *save);
 };
 
 struct amdgpu_mode_info {
 	struct atom_context *atom_context;
 	struct card_info *atom_card_info;
 	bool mode_config_initialized;
-	struct amdgpu_crtc *crtcs[6];
-	struct amdgpu_afmt *afmt[7];
+	struct amdgpu_crtc *crtcs[AMDGPU_MAX_CRTCS];
+	struct amdgpu_afmt *afmt[AMDGPU_MAX_AFMT_BLOCKS];
 	/* DVI-I properties */
 	struct drm_property *coherent_mode_property;
 	/* DAC enable load detect */
@@ -367,7 +357,6 @@ struct amdgpu_atom_ss {
 struct amdgpu_crtc {
 	struct drm_crtc base;
 	int crtc_id;
-	u16 lut_r[256], lut_g[256], lut_b[256];
 	bool enabled;
 	bool can_tile;
 	uint32_t crtc_offset;
@@ -389,7 +378,6 @@ struct amdgpu_crtc {
 	struct drm_display_mode native_mode;
 	u32 pll_id;
 	/* page flipping */
-	struct workqueue_struct *pflip_queue;
 	struct amdgpu_flip_work *pflip_works;
 	enum amdgpu_flip_status pflip_status;
 	int deferred_flip_completion;
@@ -407,7 +395,11 @@ struct amdgpu_crtc {
 	u32 line_time;
 	u32 wm_low;
 	u32 wm_high;
+	u32 lb_vblank_lead_lines;
 	struct drm_display_mode hw_mode;
+	/* for virtual dce */
+	struct hrtimer vblank_timer;
+	enum amdgpu_interrupt_state vsync_timer_enabled;
 };
 
 struct amdgpu_encoder_atom_dig {
@@ -528,6 +520,13 @@ struct amdgpu_framebuffer {
 #define ENCODER_MODE_IS_DP(em) (((em) == ATOM_ENCODER_MODE_DP) || \
 				((em) == ATOM_ENCODER_MODE_DP_MST))
 
+/* Driver internal use only flags of amdgpu_get_crtc_scanoutpos() */
+#define DRM_SCANOUTPOS_VALID        (1 << 0)
+#define DRM_SCANOUTPOS_IN_VBLANK    (1 << 1)
+#define DRM_SCANOUTPOS_ACCURATE     (1 << 2)
+#define USE_REAL_VBLANKSTART		(1 << 30)
+#define GET_DISTANCE_TO_VBLANKSTART	(1 << 31)
+
 void amdgpu_link_encoder_connector(struct drm_device *dev);
 
 struct drm_connector *
@@ -551,7 +550,7 @@ int amdgpu_get_crtc_scanoutpos(struct drm_device *dev, unsigned int pipe,
 
 int amdgpu_framebuffer_init(struct drm_device *dev,
 			     struct amdgpu_framebuffer *rfb,
-			     struct drm_mode_fb_cmd2 *mode_cmd,
+			     const struct drm_mode_fb_cmd2 *mode_cmd,
 			     struct drm_gem_object *obj);
 
 int amdgpufb_remove(struct drm_device *dev, struct drm_framebuffer *fb);
@@ -581,11 +580,13 @@ int amdgpu_align_pitch(struct amdgpu_device *adev, int width, int bpp, bool tile
 /* amdgpu_display.c */
 void amdgpu_print_display_setup(struct drm_device *dev);
 int amdgpu_modeset_create_props(struct amdgpu_device *adev);
-int amdgpu_crtc_set_config(struct drm_mode_set *set);
-int amdgpu_crtc_page_flip(struct drm_crtc *crtc,
-			  struct drm_framebuffer *fb,
-			  struct drm_pending_vblank_event *event,
-			  uint32_t page_flip_flags);
+int amdgpu_crtc_set_config(struct drm_mode_set *set,
+			   struct drm_modeset_acquire_ctx *ctx);
+int amdgpu_crtc_page_flip_target(struct drm_crtc *crtc,
+				 struct drm_framebuffer *fb,
+				 struct drm_pending_vblank_event *event,
+				 uint32_t page_flip_flags, uint32_t target,
+				 struct drm_modeset_acquire_ctx *ctx);
 extern const struct drm_mode_config_funcs amdgpu_mode_funcs;
 
 #endif

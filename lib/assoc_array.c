@@ -1,6 +1,6 @@
 /* Generic associative array implementation.
  *
- * See Documentation/assoc_array.txt for information.
+ * See Documentation/core-api/assoc_array.rst for information.
  *
  * Copyright (C) 2013 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
@@ -524,7 +524,9 @@ static bool assoc_array_insert_into_terminal_node(struct assoc_array_edit *edit,
 			free_slot = i;
 			continue;
 		}
-		if (ops->compare_object(assoc_array_ptr_to_leaf(ptr), index_key)) {
+		if (assoc_array_ptr_is_leaf(ptr) &&
+		    ops->compare_object(assoc_array_ptr_to_leaf(ptr),
+					index_key)) {
 			pr_devel("replace in slot %d\n", i);
 			edit->leaf_p = &node->slots[i];
 			edit->dead_leaf = node->slots[i];

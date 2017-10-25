@@ -77,7 +77,7 @@
 #define VF610_ADC_ADSTS_MASK		0x300
 #define VF610_ADC_ADLPC_EN		0x80
 #define VF610_ADC_ADHSC_EN		0x400
-#define VF610_ADC_REFSEL_VALT		0x100
+#define VF610_ADC_REFSEL_VALT		0x800
 #define VF610_ADC_REFSEL_VBG		0x1000
 #define VF610_ADC_ADTRG_HARD		0x2000
 #define VF610_ADC_AVGS_8		0x4000
@@ -105,6 +105,13 @@
 #define VF610_ADC_TIMEOUT		msecs_to_jiffies(100)
 
 #define DEFAULT_SAMPLE_TIME		1000
+
+/* V at 25°C of 696 mV */
+#define VF610_VTEMP25_3V0		950
+/* V at 25°C of 699 mV */
+#define VF610_VTEMP25_3V3		867
+/* Typical sensor slope coefficient at all temperatures */
+#define VF610_TEMP_SLOPE_COEFF		1840
 
 enum clk_sel {
 	VF610_ADCIOC_BUSCLK_SET,
@@ -197,6 +204,8 @@ static inline void vf610_adc_calculate_rates(struct vf610_adc *info)
 		adc_feature->clk_div = 8;
 	}
 
+	adck_rate = ipg_rate / adc_feature->clk_div;
+
 	/*
 	 * Determine the long sample time adder value to be used based
 	 * on the default minimum sample time provided.
@@ -221,7 +230,6 @@ static inline void vf610_adc_calculate_rates(struct vf610_adc *info)
 	 * BCT (Base Conversion Time): fixed to 25 ADCK cycles for 12 bit mode
 	 * LSTAdder(Long Sample Time): 3, 5, 7, 9, 13, 17, 21, 25 ADCK cycles
 	 */
-	adck_rate = ipg_rate / info->adc_feature.clk_div;
 	for (i = 0; i < ARRAY_SIZE(vf610_hw_avgs); i++)
 		info->sample_freq_avail[i] =
 			adck_rate / (6 + vf610_hw_avgs[i] *
@@ -576,7 +584,7 @@ static int vf610_adc_read_data(struct vf610_adc *info)
 
 static irqreturn_t vf610_adc_isr(int irq, void *dev_id)
 {
-	struct iio_dev *indio_dev = (struct iio_dev *)dev_id;
+	struct iio_dev *indio_dev = dev_id;
 	struct vf610_adc *info = iio_priv(indio_dev);
 	int coco;
 
@@ -586,7 +594,8 @@ static irqreturn_t vf610_adc_isr(int irq, void *dev_id)
 		if (iio_buffer_enabled(indio_dev)) {
 			info->buffer[0] = info->value;
 			iio_push_to_buffers_with_timestamp(indio_dev,
-					info->buffer, iio_get_time_ns());
+					info->buffer,
+					iio_get_time_ns(indio_dev));
 			iio_trigger_notify_done(indio_dev->trig);
 		} else
 			complete(&info->completion);
@@ -663,11 +672,13 @@ static int vf610_read_raw(struct iio_dev *indio_dev,
 			break;
 		case IIO_TEMP:
 			/*
-			* Calculate in degree Celsius times 1000
-			* Using sensor slope of 1.84 mV/°C and
-			* V at 25°C of 696 mV
-			*/
-			*val = 25000 - ((int)info->value - 864) * 1000000 / 1840;
+			 * Calculate in degree Celsius times 1000
+			 * Using the typical sensor slope of 1.84 mV/°C
+			 * and VREFH_ADC at 3.3V, V at 25°C of 699 mV
+			 */
+			*val = 25000 - ((int)info->value - VF610_VTEMP25_3V3) *
+					1000000 / VF610_TEMP_SLOPE_COEFF;
+
 			break;
 		default:
 			mutex_unlock(&indio_dev->mlock);
@@ -704,19 +715,19 @@ static int vf610_write_raw(struct iio_dev *indio_dev,
 	int i;
 
 	switch (mask) {
-		case IIO_CHAN_INFO_SAMP_FREQ:
-			for (i = 0;
-				i < ARRAY_SIZE(info->sample_freq_avail);
-				i++)
-				if (val == info->sample_freq_avail[i]) {
-					info->adc_feature.sample_rate = i;
-					vf610_adc_sample_set(info);
-					return 0;
-				}
-			break;
+	case IIO_CHAN_INFO_SAMP_FREQ:
+		for (i = 0;
+			i < ARRAY_SIZE(info->sample_freq_avail);
+			i++)
+			if (val == info->sample_freq_avail[i]) {
+				info->adc_feature.sample_rate = i;
+				vf610_adc_sample_set(info);
+				return 0;
+			}
+		break;
 
-		default:
-			break;
+	default:
+		break;
 	}
 
 	return -EINVAL;

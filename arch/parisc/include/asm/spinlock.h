@@ -13,8 +13,6 @@ static inline int arch_spin_is_locked(arch_spinlock_t *x)
 }
 
 #define arch_spin_lock(lock) arch_spin_lock_flags(lock, 0)
-#define arch_spin_unlock_wait(x) \
-		do { cpu_relax(); } while (arch_spin_is_locked(x))
 
 static inline void arch_spin_lock_flags(arch_spinlock_t *x,
 					 unsigned long flags)
